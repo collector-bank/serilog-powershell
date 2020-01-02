@@ -11,11 +11,99 @@ function Main($mainargs)
 
     $connstr = $mainargs[0]
 
+    $logger = Setup-Logging $connstr
+
+    $logger.Information("hello123")
+}
+
+function Setup-Logging()
+{
+$csharpcode = 'using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.IO;
+using System.Linq;
+using Serilog.Events;
+
+public class ScalarValueTypeSuffixJsonFormatter : Serilog.Formatting.Json.JsonFormatter
+{
+    private readonly Dictionary<Type, string> _suffixes = new Dictionary<Type, string>
+    {
+        [typeof(bool)] = "_b",
+
+        [typeof(byte)] = "_i",
+        [typeof(sbyte)] = "_i",
+        [typeof(short)] = "_i",
+        [typeof(ushort)] = "_i",
+        [typeof(int)] = "_i",
+        [typeof(uint)] = "_i",
+        [typeof(long)] = "_i",
+        [typeof(ulong)] = "_i",
+
+        [typeof(float)] = "_d",
+        [typeof(double)] = "_d",
+        [typeof(decimal)] = "_d",
+
+        [typeof(DateTime)] = "_t",
+        [typeof(DateTimeOffset)] = "_t",
+        [typeof(TimeSpan)] = "_ts",
+
+        [typeof(string)] = "_s",
+    };
+
+    public ScalarValueTypeSuffixJsonFormatter(string closingDelimiter = null, bool renderMessage = true, IFormatProvider formatProvider = null)
+        : base(closingDelimiter, renderMessage, formatProvider)
+    {
+    }
+
+    public void AddSuffix(Type type, string suffix)
+    {
+        _suffixes[type] = suffix;
+    }
+
+    [Obsolete]
+    protected override void WriteJsonProperty(string name, object value, ref string precedingDelimiter, TextWriter output)
+    {
+        base.WriteJsonProperty(DotEscapeFieldName(name + GetSuffix(value)), value, ref precedingDelimiter, output);
+    }
+
+    [Obsolete]
+    protected override void WriteDictionary(IReadOnlyDictionary<ScalarValue, LogEventPropertyValue> elements, TextWriter output)
+    {
+        var dictionary = elements.ToDictionary(
+            pair => new ScalarValue(DotEscapeFieldName(pair.Key.Value + GetSuffix(pair.Value))),
+            pair => pair.Value);
+
+        var readOnlyDictionary = new ReadOnlyDictionary<ScalarValue, LogEventPropertyValue>(dictionary);
+
+        base.WriteDictionary(readOnlyDictionary, output);
+    }
+
+    protected virtual string DotEscapeFieldName(string value)
+    {
+        return value?.Replace(''.'', ''/'');
+    }
+
+    private string GetSuffix(object value)
+    {
+        if (value is ScalarValue scalarValue)
+        {
+            if (scalarValue.Value != null && _suffixes.ContainsKey(scalarValue.Value.GetType()))
+                return _suffixes[scalarValue.Value.GetType()];
+            return _suffixes[typeof(string)];
+        }
+
+        return string.Empty;
+    }
+}'
+
     Load-Dependencies
 
+    Add-Type $csharpcode -ReferencedAssemblies "Serilog.dll","Serilog.Formatting.Compact.dll","System.Linq.dll","netstandard","System.Runtime.Extensions","System.Runtime","System.Collections","System.ObjectModel"
 
-    $logger = ([Serilog.LoggerConfiguration]::new()).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([Serilog.Formatting.Json.JsonFormatter]::new()))).CreateLogger()
-    $logger.Information("hello123")
+    $logger = ([Serilog.LoggerConfiguration]::new()).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([ScalarValueTypeSuffixJsonFormatter]::new()))).CreateLogger()
+
+    return $logger
 }
 
 function Load-Dependencies()
@@ -26,6 +114,7 @@ function Load-Dependencies()
         "Microsoft.Azure.ServiceBus",
         "Microsoft.IdentityModel.Clients.ActiveDirectory",
         "Serilog",
+        "Serilog.Formatting.Compact",
         "Serilog.Sinks.AzureEventHub",
         "Serilog.Sinks.PeriodicBatching"
 
@@ -113,7 +202,7 @@ function Download-Nuget([string] $packageName)
     }
 
     dir -Directory | % {
-        dir (Join-Path $_.Name "lib" "netstandard*") | sort | select -Last 1 | dir -Filter *.dll | % {
+        dir (Join-Path $_.Name "lib" "netstandard*") | Sort-Object | Select-Object -Last 1 | dir -Filter *.dll | % {
             [string] $nugetdllfile = $_.FullName.Substring((pwd).Path.Length+1)
             Write-Host ("Moving: '" + $nugetdllfile + "' -> .") -f Green
             move $nugetdllfile .
