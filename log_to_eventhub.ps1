@@ -3,20 +3,29 @@ $ErrorActionPreference = "Stop"
 
 function Main($mainargs)
 {
-    if (!$mainargs -or $mainargs.Count -ne 1)
+    if (!$mainargs -or $mainargs.Count -lt 1 -or $mainargs.Count -gt 3)
     {
-        Write-Host ("Usage: pwsh log_to_eventhub.ps1 <eventhubconnstr>") -f Red
+        Write-Host ("Usage: pwsh log_to_eventhub.ps1 <eventhubconnstr> [Team] [Department]") -f Red
         exit 1
     }
 
     $connstr = $mainargs[0]
+    if ($mainargs.Count -eq 3)
+    {
+        [string] $team = $mainargs[1]
+        [string] $department = $mainargs[2]
 
-    $logger = Setup-Logging $connstr
+        $logger = Setup-Logging $connstr $team $department
+    }
+    else
+    {
+        $logger = Setup-Logging $connstr
+    }
 
     $logger.Information("hello123")
 }
 
-function Setup-Logging()
+function Setup-Logging([string] $connstr, [string] $team, [string] $department)
 {
 $csharpcode = 'using System;
 using System.Collections.Generic;
@@ -97,11 +106,43 @@ public class ScalarValueTypeSuffixJsonFormatter : Serilog.Formatting.Json.JsonFo
     }
 }'
 
+
     Load-Dependencies
 
-    Add-Type $csharpcode -ReferencedAssemblies "Serilog.dll","Serilog.Formatting.Compact.dll","System.Linq.dll","netstandard","System.Runtime.Extensions","System.Runtime","System.Collections","System.ObjectModel"
+    Add-Type $csharpcode -ReferencedAssemblies "Serilog","Serilog.Formatting.Compact","System.Linq","netstandard","System.Runtime.Extensions","System.Runtime","System.Collections","System.ObjectModel"
 
-    $logger = ([Serilog.LoggerConfiguration]::new()).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([ScalarValueTypeSuffixJsonFormatter]::new()))).CreateLogger()
+    if ($team -and $department)
+    {
+$enrichercode = 'using System;
+using System.Collections.Generic;
+
+using global::Serilog.Core;
+using global::Serilog.Events;
+
+public class AuthorEnricher : ILogEventEnricher
+{
+    private readonly IDictionary<string, string> _dictionary;
+
+    public AuthorEnricher(string team, string department)
+    {
+        _dictionary = new Dictionary<string, string> { ["Team"] = team, ["Department"] = department };
+    }
+
+    public void Enrich(LogEvent logEvent, ILogEventPropertyFactory propertyFactory)
+    {
+        logEvent.AddPropertyIfAbsent(propertyFactory.CreateProperty("Author", _dictionary, destructureObjects: true));
+    }
+}'
+
+
+        Add-Type $enrichercode -ReferencedAssemblies "Serilog","System.Collections","netstandard"
+
+        $logger = ([Serilog.LoggerConfiguration]::new()).Enrich.With(([AuthorEnricher]::new($team, $department))).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([ScalarValueTypeSuffixJsonFormatter]::new()))).CreateLogger()
+    }
+    else
+    {
+        $logger = ([Serilog.LoggerConfiguration]::new()).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([ScalarValueTypeSuffixJsonFormatter]::new()))).CreateLogger()
+    }
 
     return $logger
 }
@@ -201,9 +242,9 @@ function Download-Nuget([string] $packageName)
         del $nugetfile
     }
 
-    dir -Directory | % {
-        dir (Join-Path $_.Name "lib" "netstandard*") | Sort-Object | Select-Object -Last 1 | dir -Filter *.dll | % {
-            [string] $nugetdllfile = $_.FullName.Substring((pwd).Path.Length+1)
+    dir -Directory | ? { Test-Path (Join-Path $_.Name "lib" "netstandard*" "*.dll") } | % {
+        dir (Join-Path $_.Name "lib" "netstandard*" "*.dll") | Sort-Object -Bottom 1 | % {
+            [string] $nugetdllfile = $_.FullName.Substring((pwd).Path.Length + 1)
             Write-Host ("Moving: '" + $nugetdllfile + "' -> .") -f Green
             move $nugetdllfile .
         }
