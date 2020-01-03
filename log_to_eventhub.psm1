@@ -1,31 +1,24 @@
 Set-StrictMode -v latest
 $ErrorActionPreference = "Stop"
 
-function Main($mainargs)
+function Main()
 {
-    if (!$mainargs -or $mainargs.Count -lt 1 -or $mainargs.Count -gt 3)
+    if (!$env:eventhubconnstr)
     {
-        Write-Host ("Usage: pwsh log_to_eventhub.ps1 <eventhubconnstr> [Team] [Department]") -f Red
-        exit 1
+        throw ("Missing environment variable: eventhubconnstr")
     }
 
-    $connstr = $mainargs[0]
-    if ($mainargs.Count -eq 3)
+    if ($env:serilogteam -and $env:serilogdepartment)
     {
-        [string] $team = $mainargs[1]
-        [string] $department = $mainargs[2]
-
-        $logger = Setup-Logging $connstr $team $department
+        $global:logger = Get-Logging $env:eventhubconnstr $env:serilogteam $env:serilogdepartment
     }
     else
     {
-        $logger = Setup-Logging $connstr
+        $global:logger = Get-Logging $env:eventhubconnstr
     }
-
-    $logger.Information("hello123")
 }
 
-function Setup-Logging([string] $connstr, [string] $team, [string] $department)
+function Get-Logging([string] $connstr, [string] $team, [string] $department)
 {
 $csharpcode = 'using System;
 using System.Collections.Generic;
@@ -107,7 +100,7 @@ public class ScalarValueTypeSuffixJsonFormatter : Serilog.Formatting.Json.JsonFo
 }'
 
 
-    Load-Dependencies
+    Get-Dependencies
 
     Add-Type $csharpcode -ReferencedAssemblies "Serilog","Serilog.Formatting.Compact","System.Linq","netstandard","System.Runtime.Extensions","System.Runtime","System.Collections","System.ObjectModel"
 
@@ -147,7 +140,7 @@ public class AuthorEnricher : ILogEventEnricher
     return $logger
 }
 
-function Load-Dependencies()
+function Get-Dependencies()
 {
     [string[]] $nugets = `
         "Microsoft.Azure.Amqp",
@@ -161,7 +154,7 @@ function Load-Dependencies()
 
     foreach ($nuget in $nugets)
     {
-        Download-Nuget $nuget
+        Get-Nuget $nuget
     }
     foreach ($nuget in $nugets)
     {
@@ -171,7 +164,7 @@ function Load-Dependencies()
     }
 }
 
-function Download-Nuget([string] $packageName)
+function Get-Nuget([string] $packageName)
 {
     [string] $dllfile = $packageName + ".dll"
     if (Test-Path $dllfile)
@@ -253,4 +246,4 @@ function Download-Nuget([string] $packageName)
     }
 }
 
-Main $args
+Main
