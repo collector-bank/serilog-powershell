@@ -99,10 +99,11 @@ public class ScalarValueTypeSuffixJsonFormatter : Serilog.Formatting.Json.JsonFo
     }
 }'
 
+    [string] $assembliesfolder = Join-Path (pwd).Path "log_to_eventhub_assemblies"
 
-    Get-Dependencies
+    Get-Dependencies $assembliesfolder
 
-    Add-Type $csharpcode -ReferencedAssemblies "Serilog","Serilog.Formatting.Compact","System.Linq","netstandard","System.Runtime.Extensions","System.Runtime","System.Collections","System.ObjectModel"
+    Add-Type $csharpcode -ReferencedAssemblies (Join-Path $assembliesfolder "Serilog.dll"),(Join-Path $assembliesfolder "Serilog.Formatting.Compact.dll"),"System.Linq","netstandard","System.Runtime.Extensions","System.Runtime","System.Collections","System.ObjectModel"
 
     if ($team -and $department)
     {
@@ -128,7 +129,7 @@ public class AuthorEnricher : ILogEventEnricher
 }'
 
 
-        Add-Type $enrichercode -ReferencedAssemblies "Serilog","System.Collections","netstandard"
+        Add-Type $enrichercode -ReferencedAssemblies (Join-Path $assembliesfolder "Serilog.dll"),"System.Collections","netstandard"
 
         $logger = ([Serilog.LoggerConfiguration]::new()).Enrich.With(([AuthorEnricher]::new($team, $department))).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([ScalarValueTypeSuffixJsonFormatter]::new()))).CreateLogger()
     }
@@ -140,40 +141,40 @@ public class AuthorEnricher : ILogEventEnricher
     return $logger
 }
 
-function Get-Dependencies()
+function Get-Dependencies([string] $assembliesfolder)
 {
     [string[]] $nugets = `
         "Microsoft.Azure.Amqp",
         "Microsoft.Azure.EventHubs",
-        "Microsoft.Azure.ServiceBus",
-        "Microsoft.IdentityModel.Clients.ActiveDirectory",
         "Serilog",
         "Serilog.Formatting.Compact",
         "Serilog.Sinks.AzureEventHub",
         "Serilog.Sinks.PeriodicBatching"
 
-    foreach ($nuget in $nugets)
+    [string[]] $dllfiles = @($nugets | % { Get-Nuget $_ $assembliesfolder })
+    foreach ($dllfile in $dllfiles)
     {
-        Get-Nuget $nuget
-    }
-    foreach ($nuget in $nugets)
-    {
-        [string] $filename = Join-Path (pwd).Path ($nuget + ".dll")
-        Write-Host ("Loading: '" + $filename + "'") -f Green
-        Import-Module $filename
+        Write-Host ("Loading: '" + $dllfile + "'") -f Green
+        Import-Module $dllfile
     }
 }
 
-function Get-Nuget([string] $packageName)
+function Get-Nuget([string] $packagename, [string] $assembliesfolder)
 {
-    [string] $dllfile = $packageName + ".dll"
+    if (!(Test-Path $assembliesfolder))
+    {
+        Write-Host ("Creating folder: '" + $assembliesfolder + "'") -f Green
+        md $assembliesfolder | Out-Null
+    }
+
+    [string] $dllfile = Join-Path $assembliesfolder ($packagename + ".dll")
     if (Test-Path $dllfile)
     {
         Write-Host ("File already downloaded: '" + $dllfile + "'") -f Green
-        return
+        return $dllfile
     }
 
-    [string] $url = "https://www.nuget.org/packages/" + $packageName
+    [string] $url = "https://www.nuget.org/packages/" + $packagename
 
     Write-Host ("Downloading page: '" + $url + "'") -f Green
     [string[]] $linkrows = @(((Invoke-WebRequest $url).Content.Split("`n")) | ? { $_.Contains("Download package") })
@@ -203,7 +204,7 @@ function Get-Nuget([string] $packageName)
 
     [string] $downloadLink = $linkrows[0].Substring($start, $end-$start)
 
-    [string] $nugetfile = $packageName + ".nupkg"
+    [string] $nugetfile = Join-Path $assembliesfolder ($packagename + ".nupkg")
 
     if (Test-Path $nugetfile)
     {
@@ -220,14 +221,15 @@ function Get-Nuget([string] $packageName)
         return
     }
 
-    if (Test-Path $packageName)
+    [string] $packagefolder = Join-Path $assembliesfolder $packagename
+    if (Test-Path $packagefolder)
     {
-        Write-Host ("Deleting folder: '" + $packageName + "'") -f Green
-        rd -Recurse -Force $packageName
+        Write-Host ("Deleting folder: '" + $packagefolder + "'") -f Green
+        rd -Recurse -Force $packagefolder
     }
 
-    Write-Host ("Extracting: '" + $nugetfile + "'") -f Green
-    Expand-Archive $nugetfile
+    Write-Host ("Extracting: '" + $nugetfile + "' -> '" + $packagefolder + "'") -f Green
+    Expand-Archive $nugetfile -DestinationPath $packagefolder
 
     if (Test-Path $nugetfile)
     {
@@ -235,15 +237,17 @@ function Get-Nuget([string] $packageName)
         del $nugetfile
     }
 
-    dir -Directory | ? { Test-Path (Join-Path $_.Name "lib" "netstandard*" "*.dll") } | % {
-        dir (Join-Path $_.Name "lib" "netstandard*" "*.dll") | Sort-Object -Bottom 1 | % {
-            [string] $nugetdllfile = $_.FullName.Substring((pwd).Path.Length + 1)
-            Write-Host ("Moving: '" + $nugetdllfile + "' -> .") -f Green
-            move $nugetdllfile .
+    dir -Directory $assembliesfolder | ? { Test-Path (Join-Path $_.FullName "lib" "netstandard*" "*.dll") } | % {
+        dir (Join-Path $_.FullName "lib" "netstandard*" "*.dll") | Sort-Object -Bottom 1 | % {
+            [string] $nugetdllfile = $_.FullName
+            Write-Host ("Moving: '" + $nugetdllfile + "' -> '" + $assembliesfolder + "'") -f Green
+            move $nugetdllfile $assembliesfolder
         }
         Write-Host ("Deleting folder: '" + $_.FullName + "'") -f Green
         rd -Recurse -Force $_.FullName
     }
+
+    return $dllfile
 }
 
 Main
