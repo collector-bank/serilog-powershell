@@ -8,17 +8,13 @@ function Main()
         throw ("Missing environment variable: eventhubconnstr")
     }
 
-    if ($env:serilogteam -and $env:serilogdepartment)
-    {
-        $global:logger = Get-Logging $env:eventhubconnstr $env:serilogteam $env:serilogdepartment
-    }
-    else
-    {
-        $global:logger = Get-Logging $env:eventhubconnstr
-    }
+    $serilogvariables = @{}
+    dir "env:/serilog.?*" | % { $serilogvariables[$_.Key.Substring(8)] = $_.Value }
+
+    $global:logger = Get-Logging $env:eventhubconnstr $serilogvariables
 }
 
-function Get-Logging([string] $connstr, [string] $team, [string] $department)
+function Get-Logging([string] $connstr, [Hashtable] $serilogvariables)
 {
 $csharpcode = 'using System;
 using System.Collections.Generic;
@@ -105,33 +101,65 @@ public class ScalarValueTypeSuffixJsonFormatter : Serilog.Formatting.Json.JsonFo
 
     Add-Type $csharpcode -ReferencedAssemblies (Join-Path $assembliesfolder "Serilog.dll"),(Join-Path $assembliesfolder "Serilog.Formatting.Compact.dll"),"System.Linq","netstandard","System.Runtime.Extensions","System.Runtime","System.Collections","System.ObjectModel"
 
-    if ($team -and $department)
+    if ($serilogvariables.Count -gt 0)
     {
-$enrichercode = 'using System;
+$enrichercode = 'using System.Linq;
+using System.Collections;
 using System.Collections.Generic;
 
 using global::Serilog.Core;
 using global::Serilog.Events;
 
-public class AuthorEnricher : ILogEventEnricher
+public class Enricher : ILogEventEnricher
 {
     private readonly IDictionary<string, string> _dictionary;
 
-    public AuthorEnricher(string team, string department)
+    public Enricher(Hashtable serilogvariables)
     {
-        _dictionary = new Dictionary<string, string> { ["Team"] = team, ["Department"] = department };
+        _dictionary = serilogvariables.Cast<DictionaryEntry>().ToDictionary(v => (string)v.Key, v => (string)v.Value);
     }
 
     public void Enrich(LogEvent logEvent, ILogEventPropertyFactory propertyFactory)
     {
-        logEvent.AddPropertyIfAbsent(propertyFactory.CreateProperty("Author", _dictionary, destructureObjects: true));
+        var propertyGroups = _dictionary.GroupBy(p =>
+        {
+            int i = p.Key.IndexOf(''.'');
+            return i < 0 ? p.Key : p.Key.Substring(0, i);
+        });
+
+        foreach (var propertyGroup in propertyGroups)
+        {
+            string propertyName = propertyGroup.Key;
+            var variables = propertyGroup.Select(v =>
+            {
+                if (v.Key.Length > propertyGroup.Key.Length + 1)
+                {
+                    return new { Key = v.Key.Substring(propertyGroup.Key.Length + 1), v.Value };
+                }
+                else
+                {
+                    return new { Key = string.Empty, v.Value };
+                }
+            }).ToArray();
+
+            if (variables.Length > 1)
+            {
+                var values = propertyGroup.ToDictionary(p => p.Key.Length <= propertyGroup.Key.Length ? string.Empty : p.Key.Substring(propertyGroup.Key.Length + 1), p => p.Value);
+                logEvent.AddPropertyIfAbsent(propertyFactory.CreateProperty(propertyName, values, destructureObjects: true));
+            }
+            else
+            {
+                string value = variables[0].Value;
+                logEvent.AddPropertyIfAbsent(propertyFactory.CreateProperty(propertyName, value, destructureObjects: true));
+            }
+        }
     }
 }'
 
 
-        Add-Type $enrichercode -ReferencedAssemblies (Join-Path $assembliesfolder "Serilog.dll"),"System.Collections","netstandard"
+        Add-Type $enrichercode -ReferencedAssemblies (Join-Path $assembliesfolder "Serilog.dll"),"System.Collections","netstandard","System.Runtime.Extensions","System.Linq"
 
-        $logger = ([Serilog.LoggerConfiguration]::new()).Enrich.With(([AuthorEnricher]::new($team, $department))).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([ScalarValueTypeSuffixJsonFormatter]::new()))).CreateLogger()
+        $logger = ([Serilog.LoggerConfiguration]::new()).Enrich.With(([Enricher]::new($serilogvariables))).WriteTo.Sink([Serilog.Sinks.AzureEventHub.AzureEventHubSink]::new(([Microsoft.Azure.EventHubs.EventHubClient]::CreateFromConnectionString($connstr)),([ScalarValueTypeSuffixJsonFormatter]::new()))).CreateLogger()
     }
     else
     {
